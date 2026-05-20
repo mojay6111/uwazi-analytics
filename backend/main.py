@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from routers import dashboard, audit_opinions, upload
 import os
 
 load_dotenv()
@@ -11,7 +12,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS - allow Next.js frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -23,12 +23,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =============================================
-# ROUTERS (we add these as we build each module)
-# =============================================
-# from routers import upload, dashboard, forecast
-# from routers import audit_opinions, risk_scores
-# from routers import pending_bills, civic, chat
+# Routers
+app.include_router(dashboard.router)
+app.include_router(audit_opinions.router)
+app.include_router(upload.router)
 
 @app.get("/")
 def root():

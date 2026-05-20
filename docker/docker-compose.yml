@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   frontend:
     build:
@@ -58,7 +56,7 @@ services:
       - POSTGRES_PASSWORD=uwazi_pass
       - POSTGRES_DB=uwazi_db
     ports:
-      - "5433:5432"
+      - "5434:5432"
     volumes:
       - uwazi_pg_data:/var/lib/postgresql/data
       - ../database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
