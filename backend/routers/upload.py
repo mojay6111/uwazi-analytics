@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from models.database import get_db
 from services.pdf_extractor import extract_text_from_pdf, get_pdf_metadata
-from services.claude_extractor import extract_with_retry
+from services.rule_extractor import full_rule_extraction
 from services.data_normalizer import store_extracted_data
 import os
 import shutil
@@ -13,6 +13,8 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+USE_CLAUDE = os.getenv("USE_CLAUDE", "false").lower() == "true"
 
 
 @router.get("/")
@@ -30,11 +32,9 @@ def get_reports(db: Session = Depends(get_db)):
 def process_report_background(
     report_id: str,
     file_path: str,
-    db_url: str
+    db_url: str,
+    use_claude: bool = False
 ):
-    """
-    Background task: extract PDF text → Claude extraction → store in DB.
-    """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -43,36 +43,39 @@ def process_report_background(
     db = SessionLocal()
 
     try:
-        # Update status to extracting
+        # Update status
         db.execute(text("""
             UPDATE reports SET extraction_status = 'extracting' WHERE id = :id
         """), {"id": report_id})
         db.commit()
 
-        # Step 1: Extract text from PDF
+        # Step 1: Extract text
         print(f"[{report_id}] Extracting text from PDF...")
         report_text = extract_text_from_pdf(file_path)
         print(f"[{report_id}] Extracted {len(report_text)} characters")
 
-        # Update status to processing
         db.execute(text("""
             UPDATE reports SET extraction_status = 'processing' WHERE id = :id
         """), {"id": report_id})
         db.commit()
 
-        # Step 2: Claude extraction
-        print(f"[{report_id}] Running Claude extraction...")
-        extracted = extract_with_retry(report_text)
-        print(f"[{report_id}] Extraction complete")
+        # Step 2: Extract structured data
+        if use_claude:
+            print(f"[{report_id}] Using Claude extraction...")
+            from services.claude_extractor import extract_with_retry
+            extracted = extract_with_retry(report_text)
+        else:
+            print(f"[{report_id}] Using rule-based extraction...")
+            extracted = full_rule_extraction(report_text)
 
-        # Step 3: Store in database
+        # Step 3: Store in DB
         print(f"[{report_id}] Storing extracted data...")
         stored = store_extracted_data(db, report_id, extracted)
         print(f"[{report_id}] Stored: {stored}")
 
-        # Update status to complete
+        # Mark complete
         db.execute(text("""
-            UPDATE reports 
+            UPDATE reports
             SET extraction_status = 'complete', extracted = true
             WHERE id = :id
         """), {"id": report_id})
@@ -82,9 +85,7 @@ def process_report_background(
     except Exception as e:
         print(f"[{report_id}] ERROR: {e}")
         db.execute(text("""
-            UPDATE reports 
-            SET extraction_status = 'error'
-            WHERE id = :id
+            UPDATE reports SET extraction_status = 'error' WHERE id = :id
         """), {"id": report_id})
         db.commit()
     finally:
@@ -99,18 +100,15 @@ async def upload_report(
     year: int = Form(...),
     db: Session = Depends(get_db)
 ):
-    # Validate file type
     if not file.filename.endswith(".pdf"):
         return {"error": "Only PDF files are supported"}
 
-    # Save file
     file_id = str(uuid.uuid4())
     file_path = f"{UPLOAD_DIR}/{file_id}_{file.filename}"
 
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # Insert report record
     result = db.execute(text("""
         INSERT INTO reports (title, year, report_type, file_path, file_name, extracted, extraction_status)
         VALUES (:title, :year, 'national_government', :file_path, :file_name, false, 'pending')
@@ -124,19 +122,20 @@ async def upload_report(
     db.commit()
     report_id = str(result.fetchone()[0])
 
-    # Trigger background processing
     db_url = os.getenv("DATABASE_URL")
     background_tasks.add_task(
         process_report_background,
         report_id,
         file_path,
-        db_url
+        db_url,
+        USE_CLAUDE
     )
 
     return {
-        "message": "Report uploaded. Processing started in background.",
+        "message": "Report uploaded. Processing started.",
         "report_id": report_id,
         "status": "pending",
+        "extraction_mode": "claude" if USE_CLAUDE else "rule-based",
         "file_name": file.filename,
     }
 
